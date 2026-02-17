@@ -1,0 +1,1182 @@
+---
+title: "2_TIP26_EDA_Sarah"
+output: html_document
+date: "2026-02-09"
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+
+library(tidyverse)
+library(lubridate)
+library(stringr)
+library(openxlsx)
+library(purrr)
+library(readr)
+library(dplyr)
+library(readxl)
+library(ggplot2)
+library(gridExtra)
+
+```
+
+## R Markdown
+
+This is an R Markdown document. Markdown is a simple formatting syntax for authoring HTML, PDF, and MS Word documents. For more details on using R Markdown see <http://rmarkdown.rstudio.com>.
+
+When you click the **Knit** button a document will be generated that includes both content as well as the output of any embedded R code chunks within the document. You can embed an R code chunk like this:
+
+```{r cars}
+root <- "C://Users/sarah/Documents/CMU/Spring 2026/Systems Synthesis/"
+data_dir <- paste0(root,"Data/Post-Cleaning/")
+output_dir <- paste0(root, "Data/EDA Results/")
+
+
+```
+
+## Including Plots
+
+You can also embed plots, for example:
+
+```{r pressure, echo=FALSE}
+#Load data files
+
+annual_employment_df <- read_excel(paste0(data_dir, "annual_employment.xlsx"))
+annual_income_df <- read_excel(paste0(data_dir, "annual_income.xlsx"))
+annual_ui_df <- read_excel(paste0(data_dir, "annual_ui.xlsx"))
+earn_df <- read_excel(paste0(data_dir, "earn_df.xlsx"))
+earnings_wide_df <- read_excel(paste0(data_dir, "earnings_wide.xlsx"))
+off_df <- read_excel(paste0(data_dir, "off_df.xlsx"))
+ss_df <- read_excel(paste0(data_dir, "ss_df.xlsx"))
+TIP_df <- read_excel(paste0(data_dir, "TIP_df.xlsx"))
+
+```
+
+Note that the `echo = FALSE` parameter was added to the code chunk to prevent printing of the R code that generated the plot.
+```{r}
+#Summary statistics
+
+##Participant type
+type <- table(TIP_df$Participant_Type)
+print(type)
+
+###Storing graduates and participant totals for use later
+g_denom <- TIP_df %>%
+  filter(Participant_Type == "Graduate") %>%
+  summarise(n = n_distinct(tip_id)) %>%
+  pull(n)
+
+p_denom <- TIP_df %>%
+  filter(Participant_Type == "Participant Only") %>%
+  summarise(n = n_distinct(tip_id)) %>%
+  pull(n)
+
+##Race
+race <- prop.table(table(TIP_df$race, TIP_df$Participant_Type), margin = 2)
+
+##Gender
+gender <- prop.table(table(TIP_df$gender, TIP_df$Participant_Type), margin = 2)
+
+##Convictions
+convicted <- prop.table(table(off_df$offense_indicator, off_df$Participant_Type), margin = 2)
+
+##Convictions pre-TIP
+
+temp_df <- off_df %>%
+  group_by(tip_id, Participant_Type) %>%                
+  summarise(has_pre_offense = any(Convicted_Pre == 1), .groups = "drop")
+
+convicted_pre <- prop.table(table(temp_df$has_pre_offense, temp_df$Participant_Type))
+print(convicted_pre)
+
+##Age (median and average)
+age <- TIP_df %>%
+      group_by(Participant_Type) %>% 
+      summarise(
+        mean_age = mean(age, na.rm = TRUE), 
+        median_age = median(age, na.rm = TRUE),
+        .groups = "drop"
+      )
+
+##Salary pre-TIP
+temp_df <- annual_income_df %>%
+  filter(distance_from_TIP < 0)
+
+income <- temp_df %>%
+  group_by(Participant_Type) %>%
+  summarise(
+    mean_income = mean(inf_adj_income, na.rm = TRUE),
+    .groups ="drop"
+  )
+
+##Participant type over time (2009 - 2025) (Bar chart)
+
+temp_df <- TIP_df %>%
+  filter(!is.na(StartYear)) %>%
+  group_by(StartYear, Participant_Type) %>%
+  summarise(count = n(), .groups = "drop")
+
+
+ggplot(temp_df, aes(x = factor(StartYear), y = count, fill = Participant_Type)) +
+  geom_bar(stat = "identity") +
+  geom_text(
+    aes(label = count),
+    position = position_stack(vjust = 0.5),
+    size = 3
+  ) +
+  labs(
+    title = "Participants by Type Over Time",
+    x = "Year",
+    y = "Number of Participants",
+    fill = "Participant Type"
+  ) +
+  theme_minimal()
+
+
+##Counts per offense gravity score for Graduate/non graduated (bar chart)
+
+temp_df <- off_df %>%
+  filter(!is.na(OGS) & (Participant_Type %in% c("Graduate", "Participant Only"))) %>%
+  group_by(OGS, Participant_Type) %>%
+  summarise(count = n(), .groups = "drop")
+
+
+ggplot(temp_df, aes(x = factor(OGS), y = count, fill = Participant_Type)) +
+  geom_col(position = position_dodge(width = 0.8)) +
+  geom_text(
+    aes(label = count),
+    position = position_dodge(width = 0.8),
+    vjust = -0.3,
+    size = 3
+  ) +
+  labs(
+    title = "Offense Gravity Score Distribution",
+    x = "Offense Gravity Score",
+    y = "Number of Participants",
+    fill = "Participant Type"
+  ) +
+  theme_minimal()
+
+print(race)
+print(gender)
+print(convicted)
+print(convicted_pre)
+print(age)
+print(income)
+```
+
+```{r}
+#Employment outcomes
+
+##Employment pre & post TIP for Graduate/non graduated, any prior employment, 3 years pre TIP, 1 year pre TIP, 1 year post TIP, 3 years post TIP, 5 years post by percent of individuals with earnings
+
+
+###by year AMONG ALL TIP PARTICIPANTS
+
+temp_df <- annual_employment_df %>%
+  filter(!is.na(Participant_Type) & distance_from_TIP <= 6 & distance_from_TIP >= -6 & employed_year == 1) 
+
+temp_df <- temp_df %>%
+  group_by(distance_from_TIP, Participant_Type, employed_year) %>%
+  summarise(count = n(), .groups = "drop") 
+
+temp_df <- temp_df %>%
+  mutate(
+    percent = case_when(
+      Participant_Type == "Graduate" ~ count / g_denom * 100,
+      Participant_Type == "Participant Only" ~ count/p_denom *100
+  ))
+
+
+ggplot(
+  temp_df,
+  aes(
+    x = factor(distance_from_TIP),
+    y = percent,
+    fill = Participant_Type
+  )
+) +
+  geom_col(position = position_dodge(width = 1),
+           width=1) +
+  
+  geom_text(
+    aes(label = paste0(round(percent, 1), "%")),
+    position = position_dodge(width = 0.8),
+    vjust = -0.3,
+    size = 3
+  ) +
+  
+  labs(
+    title = "Employment Participant Type Among All Participants",
+    x = "Time From TIP",
+    y = "Percent of Participants",
+    fill = "Participant Type"
+  ) +
+  scale_y_continuous(
+    limits = c(0, 100),
+    labels = scales::percent_format(scale = 1)
+  ) +
+  theme_minimal()
+
+###pre/post AMONG ALL 
+temp_df <- annual_employment_df %>%
+  mutate(
+    distance_from_TIP = case_when(
+      distance_from_TIP < 0 ~ "Pre",
+      distance_from_TIP > 0 ~ "Post"
+    )
+  ) %>%
+  filter(!is.na(distance_from_TIP))
+
+temp_df <- temp_df %>%
+  group_by(tip_id, Participant_Type, distance_from_TIP) %>%
+  summarise(employed_year = any(employed_year == 1), .groups = "drop")%>%
+  filter(employed_year)
+
+###check to ensure duplicate rows removed
+n_rows <- nrow(temp_df)
+
+n_distinct_rows <- temp_df %>%
+  summarise(n = n_distinct(paste(tip_id, distance_from_TIP))) %>%
+  pull(n)
+
+cat("Rows:", n_rows, "Distinct participant × period combos:", n_distinct_rows, "\n")
+temp_df <- temp_df %>%
+  group_by(distance_from_TIP, Participant_Type) %>%
+  summarise(count = n(), .groups = "drop") 
+
+temp_df <- temp_df %>%
+  mutate(
+    percent = case_when(
+      Participant_Type == "Graduate" ~ count / g_denom * 100,
+      Participant_Type == "Participant Only" ~ count/p_denom *100
+  ))
+
+temp_df$distance_from_TIP <- factor(temp_df$distance_from_TIP, levels = c("Pre", "Post"))
+
+ggplot(
+  temp_df,
+  aes(
+    x = factor(distance_from_TIP),
+    y = percent,
+    fill = Participant_Type
+  )
+) +
+  geom_col(position = "dodge") +
+  
+  geom_text(
+    aes(label = paste0(round(percent, .8), "%")),
+    position = "dodge",
+    vjust = -0.3,
+    size = 3
+  ) +
+  
+  labs(
+    title = "Employment by Participant Type Among All TIP Participants",
+    x = "Time From TIP",
+    y = "Percent of Participants",
+    fill = "Participant Type"
+  ) +
+  scale_y_continuous(
+    limits = c(0, 100),
+    labels = scales::percent_format(scale = 1)
+  ) +
+  theme_minimal()
+
+##Cumulative employment among TIP participants
+
+temp_df <- annual_employment_df %>%
+  filter((Participant_Type %in% c("Graduate", "Participant Only")) & employed_year == 1) 
+
+temp_df <- temp_df %>%
+  mutate(
+    cumulative_1_post = case_when(
+      distance_from_TIP == 1 ~ 1
+    )
+  )%>%
+  mutate(
+    cumulative_3_post = case_when(
+      distance_from_TIP >= 1 & distance_from_TIP <=3 ~ 1
+      )
+    ) %>%
+  mutate(
+    cumulative_1_pre = case_when(
+      distance_from_TIP == -1 ~ 1
+    )
+  ) %>%
+  mutate(
+    cumulative_3_pre = case_when(
+      distance_from_TIP <= -1 & distance_from_TIP >= -3 ~ 1)
+    ) %>%
+  mutate(
+    cumulative_5_post = case_when(
+      distance_from_TIP >= 1 & distance_from_TIP <= 5 ~ 1)
+  )
+
+  temp_df <- temp_df %>%
+    group_by(tip_id, Participant_Type) %>%
+    summarise(cumulative_1_post = any(cumulative_1_post == 1), 
+              cumulative_3_post = any(cumulative_3_post == 1),
+              cumulative_5_post = any(cumulative_5_post == 1),
+              cumulative_1_pre = any(cumulative_1_pre == 1),
+              cumulative_3_pre = any(cumulative_3_pre ==1), .groups = "drop")
+  
+  temp_df <- temp_df %>%
+    group_by(Participant_Type) %>%
+    summarise(
+      across(starts_with("cumulative"),
+             ~ n_distinct(tip_id[. == TRUE])),
+      .groups = "drop"
+    )
+  
+  temp_df <- temp_df %>%
+  mutate(
+    across(starts_with("cumulative"),
+           ~ case_when(
+               Participant_Type == "Graduate" ~ . / g_denom * 100,
+               Participant_Type == "Participant Only" ~ . / p_denom * 100
+             ),
+           .names = "{.col}_percent")
+  )
+
+
+  plot_df <- temp_df %>%
+  select(Participant_Type, ends_with("percent")) %>%
+  pivot_longer(
+    cols = ends_with("percent") ,
+    names_to = "timepoint",
+    values_to = "percent"
+  )
+  
+  plot_df$timepoint <- factor(plot_df$timepoint, levels = c("cumulative_3_pre_percent", "cumulative_1_pre_percent", "cumulative_1_post_percent", "cumulative_3_post_percent", "cumulative_5_post_percent"))
+
+  ggplot(plot_df, aes(x = timepoint,
+                    y = percent,
+                    fill = Participant_Type)) +
+  geom_col(position = "dodge") +
+  labs(
+    x = "Timepoint",
+    y = "Percent (%)",
+    fill = "Participant Type"
+  ) +
+  theme_minimal()
+
+
+
+##Average annual earnings of TIP participants before TIP (adjusted for inflation) by participant type
+
+temp_df <- earnings_wide_df %>%
+  filter(!is.na(earnings_pre))
+
+ggplot(
+  temp_df,
+  aes(x = earnings_pre, fill = Participant_Type)
+) +
+  geom_histogram(
+    position = "dodge",
+    bins = 30,
+    alpha = 0.8
+  ) +
+  theme_minimal()
+
+
+##Average annual earnings of TIP participants post TIP (adjusted for inflation) by participant type
+temp_df <- earnings_wide_df %>%
+  filter(!is.na(earnings_post))
+
+ggplot(
+  temp_df,
+  aes(x = earnings_post, fill = Participant_Type)
+) +
+  geom_histogram(
+    position = "dodge",
+    bins = 30,
+    alpha = 0.8
+  ) +
+  theme_minimal()
+
+
+##Change in annual income for participants
+
+temp_df <- earnings_wide_df %>%
+  filter(!is.na(abs_change))
+
+ggplot(
+  temp_df,
+  aes(x = abs_change, fill = Participant_Type)
+) +
+  geom_histogram(
+    position = "dodge",
+    bins = 30,
+    alpha = 0.8
+  ) +
+  theme_minimal()
+
+
+##change in annual income for graduates
+
+##Employment before and after TIP by participant type for post-2022 cohort
+
+##Graduate change in earnings before and after TIP for 2022 cohort
+```
+
+
+```{r}
+#Recidivism outcomes
+
+##Distribution of convictions and arrests over time
+
+##Criminal convictions before and after type by participant type, any prior conviction, 3 years before TIP, 1 year before TIP, 1 year post, 3 years post, 6 years post
+
+###by year FOR INDIVIDUALS WITH CONVICTIONS
+
+temp_df <- off_df %>%
+  mutate(
+    YearsSinceTIP = case_when(
+      YearsSinceTIP > 0 & YearsSinceTIP <= 1 ~ 1,
+      YearsSinceTIP >1 & YearsSinceTIP <= 2 ~ 2, 
+      YearsSinceTIP >2 & YearsSinceTIP <= 3 ~ 3,
+      YearsSinceTIP >3 & YearsSinceTIP <=4 ~ 4,
+      YearsSinceTIP >4 & YearsSinceTIP <= 5 ~5, 
+      YearsSinceTIP > 5 & YearsSinceTIP <=6 ~6,
+      YearsSinceTIP < 0 & YearsSinceTIP >= -1 ~ -1,
+      YearsSinceTIP < -1 & YearsSinceTIP >= -2 ~ -2, 
+      YearsSinceTIP < -2 & YearsSinceTIP >= -3 ~ -3,
+      YearsSinceTIP < -3 & YearsSinceTIP >=-4 ~ -4,
+      YearsSinceTIP < -4 & YearsSinceTIP >=-5 ~-5, 
+      YearsSinceTIP < -5 & YearsSinceTIP >=-6 ~-6,
+    )
+  )
+
+temp_df <- temp_df %>%
+  filter(!is.na(Participant_Type) & YearsSinceTIP <= 6 & YearsSinceTIP >= -6 & !is.na(PCS_OFF_ID)) 
+
+g_offense_denom <- temp_df %>%
+  filter(Participant_Type == "Graduate") %>%
+  summarise(n = n_distinct(tip_id)) %>%
+  pull(n)
+
+p_offense_denom <- temp_df %>%
+  filter(Participant_Type == "Participant Only") %>%
+  summarise(n = n_distinct(tip_id)) %>%
+  pull(n)
+
+temp_df <- temp_df %>%
+  group_by(tip_id, YearsSinceTIP, Participant_Type) %>%
+  summarise(offending_year = any(offense_indicator == 1), .groups = "drop")%>%
+  filter(offending_year) %>%
+  group_by(YearsSinceTIP, Participant_Type) %>%
+  summarise(count = n(), .groups = "drop")
+
+temp_df <- temp_df %>%
+  mutate(
+    percent = case_when(
+      Participant_Type == "Graduate" ~ count / g_offense_denom * 100,
+      Participant_Type == "Participant Only" ~ count/p_offense_denom *100
+  ))
+
+
+ggplot(
+  temp_df,
+  aes(
+    x = factor(YearsSinceTIP),
+    y = percent,
+    fill = Participant_Type
+  )
+) +
+  geom_col(position = position_dodge(width = 1),
+           width=1) +
+  
+  geom_text(
+    aes(label = paste0(round(percent, 1), "%")),
+    position = position_dodge(width = 0.8),
+    vjust = -0.3,
+    size = 3
+  ) +
+  
+  labs(
+    title = "Convictions by Participant Type (Among those with Conviction)",
+    x = "Time From TIP",
+    y = "Percent of Participants",
+    fill = "Participant Type"
+  ) +
+  scale_y_continuous(
+    limits = c(0, 100),
+    labels = scales::percent_format(scale = 1)
+  ) +
+  theme_minimal()
+
+###pre/post FOR INDIVIDUALS WITH CONVICTIONS
+temp_df <- off_df %>%
+  mutate(
+    YearsSinceTIP = case_when(
+      YearsSinceTIP < 0 ~ "Pre",
+      YearsSinceTIP > 0 ~ "Post"
+    )
+  ) %>%
+  filter(!is.na(YearsSinceTIP) & !is.na(PCS_OFF_ID))
+
+participant_period <- temp_df %>%
+  group_by(tip_id, Participant_Type, YearsSinceTIP) %>%
+  summarise(offending_period = any(offense_indicator == 1), .groups = "drop")%>%
+  filter(offending_period)
+
+
+g_offense_denom <- participant_period %>%
+  filter(Participant_Type == "Graduate") %>%
+  summarise(n = n_distinct(tip_id)) %>%
+  pull(n)
+
+p_offense_denom <- off_df %>%
+  filter(Participant_Type == "Participant Only") %>%
+  summarise(n = n_distinct(tip_id)) %>%
+  pull(n)
+
+participant_period <- participant_period %>%
+  group_by(YearsSinceTIP, Participant_Type) %>%
+  summarise(count = n(), .groups = "drop") 
+
+participant_period <- participant_period %>%
+  mutate(
+    percent = case_when(
+      Participant_Type == "Graduate" ~ count / g_offense_denom * 100,
+      Participant_Type == "Participant Only" ~ count/p_offense_denom *100
+  ))
+
+participant_period$YearsSinceTIP <- factor(participant_period$YearsSinceTIP, levels = c("Pre", "Post"))
+
+ggplot(
+  participant_period,
+  aes(
+    x = factor(YearsSinceTIP),
+    y = percent,
+    fill = Participant_Type
+  )
+) +
+  geom_col(position = position_dodge(width = 0.8)) +
+  
+  geom_text(
+    aes(label = paste0(round(percent, 1), "%")),
+    position = position_dodge(width = 0.8),
+    vjust = -0.3,
+    size = 3
+  ) +
+  
+  labs(
+    title = "Convictions by Participant Type (Among those with Convictions)",
+    x = "Time From TIP",
+    y = "Percent of Participants",
+    fill = "Participant Type"
+  ) +
+  scale_y_continuous(
+    limits = c(0, 100),
+    labels = scales::percent_format(scale = 1)
+  ) +
+  theme_minimal()
+
+
+
+###by year AMONG ALL TIP PARTICIPANTS
+
+temp_df <- off_df %>%
+  mutate(
+    YearsSinceTIP = case_when(
+      YearsSinceTIP > 0 & YearsSinceTIP <= 1 ~ 1,
+      YearsSinceTIP >1 & YearsSinceTIP <= 2 ~ 2, 
+      YearsSinceTIP >2 & YearsSinceTIP <= 3 ~ 3,
+      YearsSinceTIP >3 & YearsSinceTIP <=4 ~ 4,
+      YearsSinceTIP >4 & YearsSinceTIP <= 5 ~5, 
+      YearsSinceTIP > 5 & YearsSinceTIP <=6 ~6,
+      YearsSinceTIP < 0 & YearsSinceTIP >= -1 ~ -1,
+      YearsSinceTIP < -1 & YearsSinceTIP >= -2 ~ -2, 
+      YearsSinceTIP < -2 & YearsSinceTIP >= -3 ~ -3,
+      YearsSinceTIP < -3 & YearsSinceTIP >=-4 ~ -4,
+      YearsSinceTIP < -4 & YearsSinceTIP >=-5 ~-5, 
+      YearsSinceTIP < -5 & YearsSinceTIP >=-6 ~-6,
+    )
+  )
+
+temp_df <- temp_df %>%
+  filter(!is.na(Participant_Type) & YearsSinceTIP <= 6 & YearsSinceTIP >= -6 & !is.na(PCS_OFF_ID)) 
+
+temp_df <- temp_df %>%
+  group_by(tip_id, YearsSinceTIP, Participant_Type) %>%
+  summarise(offending_year = any(offense_indicator == 1), .groups = "drop")%>%
+  filter(offending_year) %>%
+  group_by(YearsSinceTIP, Participant_Type) %>%
+  summarise(count = n(), .groups = "drop")
+
+temp_df <- temp_df %>%
+  mutate(
+    percent = case_when(
+      Participant_Type == "Graduate" ~ count / g_denom * 100,
+      Participant_Type == "Participant Only" ~ count/p_denom *100
+  ))
+
+
+ggplot(
+  temp_df,
+  aes(
+    x = factor(YearsSinceTIP),
+    y = percent,
+    fill = Participant_Type
+  )
+) +
+  geom_col(position = position_dodge(width = 1),
+           width=1) +
+  
+  geom_text(
+    aes(label = paste0(round(percent, 1), "%")),
+    position = position_dodge(width = 0.8),
+    vjust = -0.3,
+    size = 3
+  ) +
+  
+  labs(
+    title = "Convictions by Participant Type Among All Participants",
+    x = "Time From TIP",
+    y = "Percent of Participants",
+    fill = "Participant Type"
+  ) +
+  scale_y_continuous(
+    limits = c(0, 100),
+    labels = scales::percent_format(scale = 1)
+  ) +
+  theme_minimal()
+
+###pre/post AMONG ALL (EVEN WITHOUT CONVICTIONS)
+temp_df <- off_df %>%
+  mutate(
+    YearsSinceTIP = case_when(
+      YearsSinceTIP < 0 ~ "Pre",
+      YearsSinceTIP > 0 ~ "Post"
+    )
+  ) %>%
+  filter(!is.na(YearsSinceTIP) & !is.na(PCS_OFF_ID))
+
+
+participant_period <- temp_df %>%
+  group_by(tip_id, Participant_Type, YearsSinceTIP) %>%
+  summarise(offending_period = any(offense_indicator == 1), .groups = "drop")%>%
+  filter(offending_period) %>%
+  group_by(YearsSinceTIP, Participant_Type) %>%
+  summarise(count = n(), .groups = "drop") 
+
+
+participant_period <- participant_period %>%
+  mutate(
+    percent = case_when(
+      Participant_Type == "Graduate" ~ count / g_denom * 100,
+      Participant_Type == "Participant Only" ~ count/p_denom *100
+  ))
+
+participant_period$YearsSinceTIP <- factor(participant_period$YearsSinceTIP, levels = c("Pre", "Post"))
+
+ggplot(
+  participant_period,
+  aes(
+    x = factor(YearsSinceTIP),
+    y = percent,
+    fill = Participant_Type
+  )
+) +
+  geom_col(position = position_dodge(width = 0.8)) +
+  
+  geom_text(
+    aes(label = paste0(round(percent, 1), "%")),
+    position = position_dodge(width = 0.8),
+    vjust = -0.3,
+    size = 3
+  ) +
+  
+  labs(
+    title = "Convictions by Participant Type Among All TIP Participants",
+    x = "Time From TIP",
+    y = "Percent of Participants",
+    fill = "Participant Type"
+  ) +
+  scale_y_continuous(
+    limits = c(0, 100),
+    labels = scales::percent_format(scale = 1)
+  ) +
+  theme_minimal()
+
+
+
+```
+
+
+```{r}
+#Social services outcomes
+
+##Percent of individuals with services by participant type any prior, 3 years prior, 1 year prior, 1 year post, 3 years post, any post
+
+###by year AMONG ALL TIP PARTICIPANTS
+
+temp_df <- ss_df %>%
+  filter(!is.na(Participant_Type) & distance_from_TIP <= 6 & distance_from_TIP >= -6 & any_one == 1) 
+
+temp_df <- temp_df %>%
+  group_by(distance_from_TIP, Participant_Type, any_one) %>%
+  summarise(count = n(), .groups = "drop") 
+
+temp_df <- temp_df %>%
+  mutate(
+    percent = case_when(
+      Participant_Type == "Graduate" ~ count / g_denom * 100,
+      Participant_Type == "Participant Only" ~ count/p_denom *100
+  ))
+
+
+ggplot(
+  temp_df,
+  aes(
+    x = factor(distance_from_TIP),
+    y = percent,
+    fill = Participant_Type
+  )
+) +
+  geom_col(position = position_dodge(width = 1),
+           width=1) +
+  
+  geom_text(
+    aes(label = paste0(round(percent, 1), "%")),
+    position = position_dodge(width = 0.8),
+    vjust = -0.3,
+    size = 3
+  ) +
+  
+  labs(
+    title = "Social Services Use by Participant Type Among All Participants",
+    x = "Time From TIP",
+    y = "Percent of Participants",
+    fill = "Participant Type"
+  ) +
+  scale_y_continuous(
+    limits = c(0, 100),
+    labels = scales::percent_format(scale = 1)
+  ) +
+  theme_minimal()
+
+###pre/post AMONG ALL 
+temp_df <- ss_df %>%
+  mutate(
+    distance_from_TIP = case_when(
+      distance_from_TIP < 0 ~ "Pre",
+      distance_from_TIP > 0 ~ "Post"
+    )
+  ) %>%
+  filter(!is.na(distance_from_TIP))
+
+temp_df <- temp_df %>%
+  group_by(tip_id, Participant_Type, distance_from_TIP) %>%
+  summarise(any_one = any(any_one == 1), .groups = "drop")%>%
+  filter(any_one)
+
+###check to ensure duplicate rows removed
+n_rows <- nrow(temp_df)
+
+n_distinct_rows <- temp_df %>%
+  summarise(n = n_distinct(paste(tip_id, distance_from_TIP))) %>%
+  pull(n)
+
+cat("Rows:", n_rows, "Distinct participant × period combos:", n_distinct_rows, "\n")
+temp_df <- temp_df %>%
+  group_by(distance_from_TIP, Participant_Type) %>%
+  summarise(count = n(), .groups = "drop") 
+
+temp_df <- temp_df %>%
+  mutate(
+    percent = case_when(
+      Participant_Type == "Graduate" ~ count / g_denom * 100,
+      Participant_Type == "Participant Only" ~ count/p_denom *100
+  ))
+
+temp_df$distance_from_TIP <- factor(temp_df$distance_from_TIP, levels = c("Pre", "Post"))
+
+ggplot(
+  temp_df,
+  aes(
+    x = factor(distance_from_TIP),
+    y = percent,
+    fill = Participant_Type
+  )
+) +
+  geom_col(position = position_dodge(width = 0.8)) +
+  
+  geom_text(
+    aes(label = paste0(round(percent, 1), "%")),
+    position = position_dodge(width = 0.8),
+    vjust = -0.3,
+    size = 3
+  ) +
+  
+  labs(
+    title = "Social Service Usage by Participant Type Among All TIP Participants",
+    x = "Time From TIP",
+    y = "Percent of Participants",
+    fill = "Participant Type"
+  ) +
+  scale_y_continuous(
+    limits = c(0, 100),
+    labels = scales::percent_format(scale = 1)
+  ) +
+  theme_minimal()
+
+
+##Same as above but just Medicaid
+
+###by year AMONG ALL TIP PARTICIPANTS
+
+temp_df <- ss_df %>%
+  filter(!is.na(Participant_Type) & distance_from_TIP <= 6 & distance_from_TIP >= -6 & medicaid == 1) 
+
+temp_df <- temp_df %>%
+  group_by(distance_from_TIP, Participant_Type, medicaid) %>%
+  summarise(count = n(), .groups = "drop") 
+
+temp_df <- temp_df %>%
+  mutate(
+    percent = case_when(
+      Participant_Type == "Graduate" ~ count / g_denom * 100,
+      Participant_Type == "Participant Only" ~ count/p_denom *100
+  ))
+
+
+ggplot(
+  temp_df,
+  aes(
+    x = factor(distance_from_TIP),
+    y = percent,
+    fill = Participant_Type
+  )
+) +
+  geom_col(position = position_dodge(width = 1),
+           width=1) +
+  
+  geom_text(
+    aes(label = paste0(round(percent, 1), "%")),
+    position = position_dodge(width = 0.8),
+    vjust = -0.3,
+    size = 3
+  ) +
+  
+  labs(
+    title = "Medicaid Use by Participant Type Among All Participants",
+    x = "Time From TIP",
+    y = "Percent of Participants",
+    fill = "Participant Type"
+  ) +
+  scale_y_continuous(
+    limits = c(0, 100),
+    labels = scales::percent_format(scale = 1)
+  ) +
+  theme_minimal()
+
+###pre/post AMONG ALL 
+temp_df <- ss_df %>%
+  mutate(
+    distance_from_TIP = case_when(
+      distance_from_TIP < 0 ~ "Pre",
+      distance_from_TIP > 0 ~ "Post"
+    )
+  ) %>%
+  filter(!is.na(distance_from_TIP))
+
+temp_df <- temp_df %>%
+  group_by(tip_id, Participant_Type, distance_from_TIP) %>%
+  summarise(medicaid = any(medicaid == 1), .groups = "drop")%>%
+  filter(medicaid)
+
+
+###check to ensure duplicate rows removed
+n_rows <- nrow(temp_df)
+
+n_distinct_rows <- temp_df %>%
+  summarise(n = n_distinct(paste(tip_id, distance_from_TIP))) %>%
+  pull(n)
+
+cat("Rows:", n_rows, "Distinct participant × period combos:", n_distinct_rows, "\n")
+temp_df <- temp_df %>%
+  group_by(distance_from_TIP, Participant_Type) %>%
+  summarise(count = n(), .groups = "drop") 
+
+temp_df <- temp_df %>%
+  mutate(
+    percent = case_when(
+      Participant_Type == "Graduate" ~ count / g_denom * 100,
+      Participant_Type == "Participant Only" ~ count/p_denom *100
+  ))
+
+
+temp_df$distance_from_TIP <- factor(temp_df$distance_from_TIP, levels = c("Pre", "Post"))
+
+ggplot(
+  temp_df,
+  aes(
+    x = factor(distance_from_TIP),
+    y = percent,
+    fill = Participant_Type
+  )
+) +
+  geom_col(position = position_dodge(width = 0.8)) +
+  
+  geom_text(
+    aes(label = paste0(round(percent, 1), "%")),
+    position = position_dodge(width = 0.8),
+    vjust = -0.3,
+    size = 3
+  ) +
+  
+  labs(
+    title = "Medicaid Usage by Participant Type Among All TIP Participants",
+    x = "Time From TIP",
+    y = "Percent of Participants",
+    fill = "Participant Type"
+  ) +
+  scale_y_continuous(
+    limits = c(0, 100),
+    labels = scales::percent_format(scale = 1)
+  ) +
+  theme_minimal()
+
+
+##Same as above but just SNAP
+
+###by year AMONG ALL TIP PARTICIPANTS
+
+temp_df <- ss_df %>%
+  filter(!is.na(Participant_Type) & distance_from_TIP <= 6 & distance_from_TIP >= -6 & SNAP_TANF == 1) 
+
+temp_df <- temp_df %>%
+  group_by(distance_from_TIP, Participant_Type, SNAP_TANF) %>%
+  summarise(count = n(), .groups = "drop") 
+
+temp_df <- temp_df %>%
+  mutate(
+    percent = case_when(
+      Participant_Type == "Graduate" ~ count / g_denom * 100,
+      Participant_Type == "Participant Only" ~ count/p_denom *100
+  ))
+
+
+ggplot(
+  temp_df,
+  aes(
+    x = factor(distance_from_TIP),
+    y = percent,
+    fill = Participant_Type
+  )
+) +
+  geom_col(position = position_dodge(width = 1),
+           width=1) +
+  
+  geom_text(
+    aes(label = paste0(round(percent, 1), "%")),
+    position = position_dodge(width = 0.8),
+    vjust = -0.3,
+    size = 3
+  ) +
+  
+  labs(
+    title = "SNAP/TANF Use by Participant Type Among All Participants",
+    x = "Time From TIP",
+    y = "Percent of Participants",
+    fill = "Participant Type"
+  ) +
+  scale_y_continuous(
+    limits = c(0, 100),
+    labels = scales::percent_format(scale = 1)
+  ) +
+  theme_minimal()
+
+###pre/post AMONG ALL 
+temp_df <- ss_df %>%
+  mutate(
+    distance_from_TIP = case_when(
+      distance_from_TIP < 0 ~ "Pre",
+      distance_from_TIP > 0 ~ "Post"
+    )
+  ) %>%
+  filter(!is.na(distance_from_TIP))
+
+temp_df <- temp_df %>%
+  group_by(tip_id, Participant_Type, distance_from_TIP) %>%
+  summarise(SNAP_TANF = any(SNAP_TANF == 1), .groups = "drop")%>%
+  filter(SNAP_TANF)
+
+
+###check to ensure duplicate rows removed
+n_rows <- nrow(temp_df)
+
+n_distinct_rows <- temp_df %>%
+  summarise(n = n_distinct(paste(tip_id, distance_from_TIP))) %>%
+  pull(n)
+
+cat("Rows:", n_rows, "Distinct participant × period combos:", n_distinct_rows, "\n")
+temp_df <- temp_df %>%
+  group_by(distance_from_TIP, Participant_Type) %>%
+  summarise(count = n(), .groups = "drop") 
+
+temp_df <- temp_df %>%
+  mutate(
+    percent = case_when(
+      Participant_Type == "Graduate" ~ count / g_denom * 100,
+      Participant_Type == "Participant Only" ~ count/p_denom *100
+  ))
+
+
+temp_df$distance_from_TIP <- factor(temp_df$distance_from_TIP, levels = c("Pre", "Post"))
+
+ggplot(
+  temp_df,
+  aes(
+    x = factor(distance_from_TIP),
+    y = percent,
+    fill = Participant_Type
+  )
+) +
+  geom_col(position = position_dodge(width = 0.8)) +
+  
+  geom_text(
+    aes(label = paste0(round(percent, 1), "%")),
+    position = position_dodge(width = 0.8),
+    vjust = -0.3,
+    size = 3
+  ) +
+  
+  labs(
+    title = "SNAP/TANF Usage by Participant Type Among All TIP Participants",
+    x = "Time From TIP",
+    y = "Percent of Participants",
+    fill = "Participant Type"
+  ) +
+  scale_y_continuous(
+    limits = c(0, 100),
+    labels = scales::percent_format(scale = 1)
+  ) +
+  theme_minimal()
+
+##Same as above but just UI
+
+###by year AMONG ALL TIP PARTICIPANTS
+
+temp_df <- ss_df %>%
+  filter(!is.na(Participant_Type) & distance_from_TIP <= 6 & distance_from_TIP >= -6 & ui_year == 1) 
+
+temp_df <- temp_df %>%
+  group_by(distance_from_TIP, Participant_Type, ui_year) %>%
+  summarise(count = n(), .groups = "drop") 
+
+temp_df <- temp_df %>%
+  mutate(
+    percent = case_when(
+      Participant_Type == "Graduate" ~ count / g_denom * 100,
+      Participant_Type == "Participant Only" ~ count/p_denom *100
+  ))
+
+
+ggplot(
+  temp_df,
+  aes(
+    x = factor(distance_from_TIP),
+    y = percent,
+    fill = Participant_Type
+  )
+) +
+  geom_col(position = position_dodge(width = 1),
+           width=1) +
+  
+  geom_text(
+    aes(label = paste0(round(percent, 1), "%")),
+    position = position_dodge(width = 0.8),
+    vjust = -0.3,
+    size = 3
+  ) +
+  
+  labs(
+    title = "UI Use by Participant Type Among All Participants",
+    x = "Time From TIP",
+    y = "Percent of Participants",
+    fill = "Participant Type"
+  ) +
+  scale_y_continuous(
+    limits = c(0, 100),
+    labels = scales::percent_format(scale = 1)
+  ) +
+  theme_minimal()
+
+###pre/post AMONG ALL 
+temp_df <- ss_df %>%
+  mutate(
+    distance_from_TIP = case_when(
+      distance_from_TIP < 0 ~ "Pre",
+      distance_from_TIP > 0 ~ "Post"
+    )
+  ) %>%
+  filter(!is.na(distance_from_TIP))
+
+temp_df <- temp_df %>%
+  group_by(tip_id, Participant_Type, distance_from_TIP) %>%
+  summarise(ui_year = any(ui_year == 1), .groups = "drop")%>%
+  filter(ui_year)
+
+
+###check to ensure duplicate rows removed
+n_rows <- nrow(temp_df)
+
+n_distinct_rows <- temp_df %>%
+  summarise(n = n_distinct(paste(tip_id, distance_from_TIP))) %>%
+  pull(n)
+
+cat("Rows:", n_rows, "Distinct participant × period combos:", n_distinct_rows, "\n")
+temp_df <- temp_df %>%
+  group_by(distance_from_TIP, Participant_Type) %>%
+  summarise(count = n(), .groups = "drop")
+
+temp_df <- temp_df %>%
+  mutate(
+    percent = case_when(
+      Participant_Type == "Graduate" ~ count / g_denom * 100,
+      Participant_Type == "Participant Only" ~ count/p_denom *100
+  ))
+
+
+temp_df$distance_from_TIP <- factor(temp_df$distance_from_TIP, levels = c("Pre", "Post"))
+
+ggplot(
+  temp_df,
+  aes(
+    x = factor(distance_from_TIP),
+    y = percent,
+    fill = Participant_Type
+  )
+) +
+  geom_col(position = position_dodge(width = 0.8)) +
+  
+  geom_text(
+    aes(label = paste0(round(percent, 1), "%")),
+    position = position_dodge(width = 0.8),
+    vjust = -0.3,
+    size = 3
+  ) +
+  
+  labs(
+    title = "UI Usage by Participant Type Among All TIP Participants",
+    x = "Time From TIP",
+    y = "Percent of Participants",
+    fill = "Participant Type"
+  ) +
+  scale_y_continuous(
+    limits = c(0, 100),
+    labels = scales::percent_format(scale = 1)
+  ) +
+  theme_minimal()
+
+```
+
+
+
+
+
+

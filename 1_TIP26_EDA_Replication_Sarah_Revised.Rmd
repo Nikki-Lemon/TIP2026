@@ -1,0 +1,403 @@
+---
+title: "1_TIP26_EDA_Replication"
+output: html_document
+date: "2026-02-08"
+---
+
+## R Markdown
+
+This is an R Markdown document. Markdown is a simple formatting syntax for authoring HTML, PDF, and MS Word documents. For more details on using R Markdown see <http://rmarkdown.rstudio.com>.
+
+When you click the **Knit** button a document will be generated that includes both content as well as the output of any embedded R code chunks within the document. You can embed an R code chunk like this:
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+
+library(tidyverse)
+library(lubridate)
+library(stringr)
+library(purrr)
+library(readr)
+library(dplyr)
+library(readxl)
+library(openxlsx)
+
+```
+
+```{r}
+#Set location for data directory and output directory
+
+root <- "C://Users/sarah/Documents/CMU/Spring 2026/Systems Synthesis/"
+data_dir <- paste0(root,"Data/Pre-Cleaning/")
+output_dir <- paste0(root, "Data/Post-Cleaning/")
+```
+
+```{r}
+#Load data files
+
+TIP_df <- read_csv(paste0(data_dir, "TIP_StudentData.csv"))
+merged_off_df <- read_csv(paste0(data_dir, "TIP_MergedSentencingData.csv"))
+
+tmp_name <- load(paste0(data_dir, "tip_cohort_demographics.rda"))
+tip_demos <- get(tmp_name)
+rm(list = tmp_name)
+
+
+tmp_name <- load(paste0(data_dir, "tip_cohort_demographics_rg.rda"))
+tip_demos_rg <- get(tmp_name)
+rm(list = tmp_name)
+
+tmp_name <- load(paste0(data_dir, "tip_cohort_human_services_activity.rda"))
+tip_ss <- get(tmp_name)
+rm(list = tmp_name)
+
+tmp_name <- load(paste0(data_dir, "tip_cohort_uibenefits.rda"))
+tip_ui <- get(tmp_name)
+rm(list = tmp_name)
+
+tmp_name <- load(paste0(data_dir, "tip_cohort_uiearnings.rda"))
+tip_earn <- get(tmp_name)
+rm(list = tmp_name)
+
+```
+
+```{r}
+#Data preparation
+
+##Creates columns for participant type, where 1 = Participant, 2 = Graduate, 3 = Interviewed Only
+
+TIP_df <- TIP_df %>%
+  mutate(
+    Participant_Type = 
+      case_when(!is.na(GraduatedDate) ~ 2,
+                is.na(GraduatedDate) & !is.na(StartDate) ~ 1, 
+                ##have to have an end date, end date - start date should be less than 78
+                is.na(StartDate) & !is.na(InterviewedDate) ~ 3,
+                ##they don't have an end date
+                is.na(StartDate) & is.na(InterviewedDate) ~ NA_integer_
+                )
+  )
+
+  TIP_df <- TIP_df %>%
+    mutate(
+      Participant_Type = factor(
+        Participant_Type,
+        levels = c(1, 2, 3),
+        labels = c("Participant Only", "Graduate", "Interviewed only")
+    )
+  )
+
+
+##Calculate age at time of TIP participation (participants and graduates) or interview (if non participant)
+
+TIP_df$age <- year(as.period(interval(start=TIP_df$DOB, end= TIP_df$StartDate)))
+
+TIP_df <- TIP_df %>%
+  mutate(
+    age = if_else(
+      is.na(StartDate), year(as.period(interval(start = TIP_df$DOB, end = TIP_df$InterviewedDate))), age
+    )
+  )
+
+
+##Add cohort indicator for each individual - 1 indicates pre cohort, 2 indicates post, 0 indicates non participant
+
+TIP_df <- TIP_df %>%
+  mutate(
+    cohort = case_when(
+      !is.na(StartDate) & StartDate >= "2022-01-01" ~ 2L,
+      !is.na(StartDate) & StartDate < "2022-01-01" ~ 1L,
+      is.na(StartDate) ~ NA_integer_
+    )
+)
+
+##Transform StartDate into a start year for later analysis
+TIP_df <- TIP_df %>%
+  mutate(
+    StartYear = year(StartDate)
+  )
+
+
+##join in demographic data
+TIP_df <- TIP_df %>%
+  left_join(
+    tip_demos %>% select(tip_id, year_of_birth, census_tract, gender, race),
+    by = "tip_id"
+  )
+
+##drop PII
+TIP_df <- TIP_df %>%
+  select(-DOB)
+
+```
+
+
+
+```{r}
+#Annualized income analysis
+
+##Split quarter code into a quarter and a year, e.g. "2017" and quarter "1" instead of "20171"
+tip_earn <- tip_earn %>%
+  mutate(quarter = as.numeric(quarter)) %>%
+  mutate(
+    year = quarter %/% 10,
+    q_num = quarter %% 10
+  )
+
+##Groups income data by year for each individual to give us annual income
+annual_income <- tip_earn %>%
+  group_by(tip_id, year) %>%
+  summarise(
+    annual_earnings = sum(earnings, na.rm = TRUE),
+    .groups = "drop"
+  )
+
+##Enter inflation data from https://www.bls.gov/data/inflation_calculator.htm
+inflation <- tibble(
+ year = c(2017, 2018, 2019, 2020, 2021, 2022, 2023, 2024),
+ start_cpi = c(242.839, 247.867, 251.712, 257.971, 261.582, 281.148, 299.17, 308.417)
+)
+
+end_cpi = 324.054
+
+##calculate annual income adjusted for inflation (Dec 2025)
+annual_income <- annual_income %>%
+  left_join(inflation, by = "year")
+
+annual_income <- annual_income %>%
+  mutate(
+    inf_adj_income = annual_earnings * (end_cpi/start_cpi)
+  )
+
+##calculate distance from TIP at time of earning
+annual_income <- annual_income %>%
+  left_join(
+    TIP_df %>% select(tip_id, StartYear, Participant_Type),
+    by = "tip_id"
+  )
+
+annual_income <- annual_income %>%
+  mutate(
+    distance_from_TIP = year - StartYear
+  )
+
+```
+
+```{r}
+#Change in annual earnings pre/post
+
+##Join full start date from TIP student dataset
+tip_earn <- tip_earn %>%
+  left_join(
+    TIP_df %>% select(tip_id, StartDate),
+    by = "tip_id"
+  )
+
+##Turn quarter code into a date
+tip_earn <- tip_earn %>%
+  mutate(
+    q_date = case_when(
+      q_num == 1 ~ paste0(year,"-12-31"),
+      q_num == 2 ~ paste0(year,"-3-31"),
+      q_num == 3 ~ paste0(year,"-6-30"),
+      q_num == 4 ~ paste0(year,"-9-30")
+    ),
+    q_date = ymd(q_date)
+  ) %>%
+  
+  ##calculates whether end of quarter is before or after their TIP start date
+  mutate(
+    period = case_when(
+      StartDate >= q_date ~ "pre",
+      StartDate < q_date ~ "post",
+      TRUE ~ NA_character_
+    )  
+  )
+
+##takes average quarterly earning by individual by period (pre or post)
+earnings_change <- tip_earn %>%
+  filter(!is.na(period) & !is.na(earnings)) %>%
+  group_by(tip_id, period) %>%
+  summarise(
+    mean_earnings_q = mean(earnings),
+    total_quarters = n(),
+    .groups = "drop"
+  )
+
+##transforms this into average annual earning
+earnings_change <- earnings_change %>%
+  mutate(
+    mean_annual_earnings = mean_earnings_q*4
+  ) 
+
+##pulls data from the same individual into one row rather than multiple
+earnings_wider <- earnings_change %>%
+  select(tip_id, period, mean_annual_earnings)
+
+earnings_wider <- earnings_wider %>%
+  pivot_wider(
+    names_from = period,
+    values_from = mean_annual_earnings,
+    names_prefix = "earnings_"
+  ) %>%
+  ##calculates absolute difference in pre-post avg annual earnings and percent change
+  mutate(
+    abs_change = earnings_post - earnings_pre,
+    per_change = (earnings_post - earnings_pre)/earnings_pre
+  )
+
+##joins in data on whether individual is a graduate, participant only, interviewed  only 
+earnings_wider <- earnings_wider %>%
+  left_join(
+    TIP_df %>% select(tip_id, Participant_Type),
+    by = "tip_id"
+  )
+
+
+```
+
+
+```{r}
+#Annualized employment analysis
+
+##Adds indicator for whether the individual was employed in the quarter based on presence of employer name
+tip_earn<- tip_earn %>%
+  mutate(
+    employed_quarter = if_else(!is.na(employer_legal_name) & employer_legal_name != "", 1L, 0L)
+  )
+
+##Groups employment status for the individual by year (if individual was employed at any quarter during the year, year receives a 1)
+annual_employment <- tip_earn %>%
+  group_by(tip_id, year) %>%
+  summarise(
+    employed_year = as.integer(any(employed_quarter == 1L)),
+    .groups = "drop"
+  )
+
+##Calculate distance from TIP during that year
+annual_employment <- annual_employment %>%
+  left_join(
+    TIP_df %>% select(tip_id, StartYear, Participant_Type),
+    by = "tip_id"
+  )
+
+annual_employment <- annual_employment %>%
+  mutate(
+    distance_from_TIP = year - StartYear
+  )
+
+
+```
+
+```{r}
+#Conviction analyses
+
+##Add in participant type
+merged_off_df <- merged_off_df %>%
+  left_join(
+    TIP_df %>% select(tip_id, Participant_Type),
+    by = "tip_id"
+  )
+
+##Add in indicator for whether individual is found in conviction records PRE-tip
+filtered_off <- merged_off_df %>%
+    filter(YearsSinceTIP < 0)
+
+pre_off_ids <- filtered_off %>%
+  distinct(tip_id) %>%
+  mutate(Convicted_Pre = 1L)
+  
+merged_off_df <- merged_off_df %>%
+  left_join(pre_off_ids, by= "tip_id")
+
+```
+
+```{r}
+#Social service usage
+
+##Adds indicators for type of participant and calculates distance from TIP during that year
+
+tip_ss <- tip_ss %>%
+  mutate(
+    SNAP_TANF = snap + tanf,
+    year = as.numeric(year)
+  )
+
+tip_ui <- tip_ui %>%
+  mutate(quarter = as.numeric(REQUEST_PERIOD)) %>%
+  mutate(
+    year = quarter %/% 10,
+    q_num = quarter %% 10
+  ) %>%
+  mutate(
+    ui_dummy = case_when(
+      !is.na(UC_BENEFIT) ~ 1,
+      is.na(UC_BENEFIT) ~ 0
+    )
+  )
+tip_ui <- rename(tip_ui, tip_id = TIP_ID)
+
+##Groups UI status for the individual by year (if individual received UI at all during the year, receives a 1)
+annual_ui <- tip_ui %>%
+  group_by(tip_id, year) %>%
+  summarise(
+    ui_year = as.integer(any(ui_dummy == 1)),
+    .groups = "drop"
+  )
+
+tip_ss_ui <- tip_ss %>%
+  full_join(
+    annual_ui,
+    by = c("tip_id", "year")
+  )
+
+tip_ss_ui <- tip_ss_ui %>%
+  left_join(
+    TIP_df %>% select(tip_id, StartYear, Participant_Type),
+    by = "tip_id"
+  ) 
+  
+tip_ss_ui <- tip_ss_ui %>%
+  mutate(
+     distance_from_TIP = as.numeric(year) - StartYear,
+  )
+
+tip_ss_ui <- tip_ss_ui %>%
+  mutate(
+    any_one = as.integer(rowSums(select(., 3:5,8:15,17:19,21,23:26) == 1, na.rm = TRUE) > 0)
+  )
+
+tip_ss_ui <- tip_ss_ui %>%
+  mutate(
+    any_one_plus_ui = as.integer(rowSums(select(., 3:5,8:15,17:19,21,23:26,28) == 1, na.rm = TRUE) > 0)
+  )
+
+```
+
+ 
+
+
+```{r}
+#Export prepared data
+write.xlsx(TIP_df, paste0(output_dir, "TIP_df.xlsx"), overwrite = TRUE)
+write.xlsx(tip_earn, paste0(output_dir, "earn_df.xlsx"), overwrite = TRUE)
+write.xlsx(annual_income, paste0(output_dir, "annual_income.xlsx"), overwrite = TRUE)
+write.xlsx(annual_ui, paste0(output_dir, "annual_ui.xlsx"), overwrite = TRUE)
+write.xlsx(earnings_wider, paste0(output_dir, "earnings_wide.xlsx"), overwrite = TRUE)
+write.xlsx(annual_employment, paste0(output_dir, "annual_employment.xlsx"), overwrite = TRUE)
+write.xlsx(merged_off_df, paste0(output_dir, "off_df.xlsx"), overwrite = TRUE)
+write.xlsx(tip_ss_ui, paste0(output_dir, "ss_df.xlsx"), overwrite = TRUE)
+
+```
+
+
+```{r}
+
+
+
+```
+
+```{r}
+
+```
+
