@@ -1,7 +1,7 @@
 ---
-title: "4_Grad_Non_Grad_Regressions"
+title: "Grad_Non_Grad_Regressions"
 author: "Sarah Giordano"
-date: "2026-04-25"
+date: "2026-05-01"
 output: html_document
 ---
 
@@ -10,89 +10,322 @@ knitr::opts_chunk$set(echo = TRUE)
 library(tidyverse)
 library(fixest)
 library(survival)
+library(broom)
+library(car)
 ```
 
 ```{r}
-root <- "C://Users/sarah/Documents/CMU/Spring 2026/Systems Synthesis/"
+root <- "#replace with your root"
 data_dir <- paste0(root,"Data/Matched/")
 output_dir <- paste0(root, "Output/")
 
-#Load data files
 
-matched_wide <- read_csv(paste0(data_dir, "matched-within-cohort-grad-non-grad.csv"))
 matched_panel <-read_csv(paste0(data_dir, "matched-panel-grad-non-grad.csv"))
 ```
 
-
-```{r cars}
-#Employment outcome
-
-employment_cl  <- clogit(employment_outcome ~ treatment + any_sentence_before_start + strata(match_pair_id),data = matched_wide, method = "efron")
-
-employment_cl_int  <- clogit(employment_outcome ~ treatment + treatment:cohort_2022 + any_sentence_before_start + strata(match_pair_id),data = matched_wide, method = "efron")
-
-print("Results for Employment Outcome (Any Employment within 1.5 years post-TIP) across all TIP")
-summary(employment_cl)
-
-print("Results for Employment Outcome (Any Employment within 1.5 years post-TIP) by cohort")
-summary(employment_cl_int)
-
-```
-
-
-
-```{r pressure, echo=FALSE}
-#Offense outcome (for all, not recidivism)
-
-offense_cl  <- clogit(offense_outcome ~ treatment + any_sentence_before_start + strata(match_pair_id),data = matched_wide, method = "efron")
-
-offense_cl_int  <- clogit(offense_outcome ~ treatment + treatment:cohort_2022 + any_sentence_before_start + strata(match_pair_id),data = matched_wide, method = "efron")
-
-print("Results for Offense Outcome (Any Offense within 1.5 years post-TIP) across all TIP")
-summary(offense_cl)
-
-print("Results for Offense Outcome (Any Offense within 1.5 years post-TIP) by cohort")
-summary(offense_cl_int)
-```
 ```{r}
-#Recidivism outcome
+#Load wide data 
 
-potential_recidivism <- matched_wide %>%
-  filter(any_sentence_before_start == 1)
-
-recidivism_cl  <- clogit(offense_outcome ~ treatment + strata(match_pair_id),data = matched_wide, method = "efron")
-
-recidivism_cl_int  <- clogit(offense_outcome ~ treatment + treatment:cohort_2022 + strata(match_pair_id),data = matched_wide, method = "efron")
-
-print("Results for Recidivism Outcome (Any Offense within 1.5 years post-TIP) across all TIP participants with previous offense")
-summary(recidivism_cl)
-
-print("Results for Recidivism Outcome (Any Offense within 1.5 years post-TIP) by cohort")
-summary(recidivism_cl_int)
-```
-```{r}
-#Earnings outcome
-matched_panel <- matched_panel %>%
+person_wide <- read_csv(paste0(data_dir,"matched_within_cohort_grad_non_grad_tight.csv"),
+                        show_col_types = FALSE) %>%
+  rename(
+    subclass            = match_pair_id,
+    log_earn_1yr        = log_earnings_1yr_preTIP,
+    log_earn_2yr        = log_earnings_2yr_preTIP,
+    job_pre_1yr         = job_right_before_tip,
+    max_ogs_before      = max_ogs_before_start,
+    num_sentences_before = num_sentences_before_start,
+    any_sentence_before = any_sentence_before_start,
+    employed_full_post_18m  = full_employed_18mo_postTIP,
+    employed_part_post_18m  = any_employed_18mo_postTIP,
+    any_offense_18m         = offense_outcome            
+  ) %>%
   mutate(
-    rel_year = as.integer(year-end_year)
+    treatment           = as.integer(treatment),
+    cohort_2022         = as.integer(cohort_2022),
+    any_sentence_before = as.integer(any_sentence_before),
+    age_band            = factor(age_band),
+    race                = factor(replace_na(as.character(race),   "Unknown")),
+    gender              = factor(replace_na(as.character(gender), "Unknown")),
+    #within_time_window already 0/1 from Python; use as full_window
+    full_window     = as.integer(within_time_window)
+  )
+```
+
+```{r}
+#Load and clean panel data
+panel_a <- read_csv(paste0(data_dir,"matched_panel_data_grad_non_grad_tight.csv"),
+                    show_col_types = FALSE) %>%
+  rename(
+    earnings_year_adj   = earnings_full_year,
+    offended_year       = offended_year
+  ) %>%
+  mutate(
+    treatment     = as.integer(treatment),
+    cohort_2022   = as.integer(cohort_2022),
+    graduated_tip = as.integer(graduated_tip),
+    # rel_year: years relative to TIP end year
+    rel_year      = year - end_year,
+    rel_year_bin  = as.integer(case_when(
+      rel_year <= -4 ~ -4L,
+      rel_year >=  4 ~  4L,
+      TRUE           ~ as.integer(rel_year)
+    ))
   )
 
-earn <- feols(
-  log(earnings_full_year + 1) ~ i(rel_year, treatment, ref = -1) | tip_id + year,
-  cluster = ~tip_id,
-  data = matched_panel
-)
+# Attach subclass from person_wide so panel rows can be stratified by matched pair
+panel_a <- panel_a %>%
+  left_join(person_wide %>% select(tip_id, subclass), by = "tip_id")
 
-earn_int<- feols(
-  log(earnings_full_year + 1) ~ i(rel_year, treatment, cohort_2022, ref = -1) | tip_id + year,
-  cluster = ~tip_id,
-  data = matched_panel
-)
-
-etable(
-  earn_int,
-  keep_raw = "rel_year::"
-)
+cat("Loaded:", nrow(person_wide), "matched individuals |",
+    nrow(panel_a), "person-years\n\n")
 ```
+```{r}
+cat("Matched sample — Graduates:", sum(person_wide$treatment == 1),
+    "| Non-graduates:", sum(person_wide$treatment == 0), "\n")
+```
+
+```{r}
+cat("Pairs:", n_distinct(person_wide$subclass), "\n\n")
+```
+```{r}
+#Exploratory Data Analysis - Quick Summaries
+
+cat("\nAnnual panel (all periods):\n")
+panel_a %>%
+  group_by(treatment, cohort_2022) %>%
+  summarise(
+    employed_full    = round(mean(employed_full_year),    3),
+    employed_partial = round(mean(employed_partial_year), 3),
+    offended         = round(mean(offended_year),         3),
+    n_persons        = n_distinct(tip_id),
+    .groups = "drop"
+  ) %>%
+  print()
+
+```
+
+```{r}
+
+cat("\nPost-exit 18m outcomes (person-level):\n")
+person_wide %>%
+  group_by(treatment, cohort_2022) %>%
+  summarise(
+    employed_full_18m = round(mean(employed_full_post_18m, na.rm = TRUE), 3),
+    employed_part_18m = round(mean(employed_part_post_18m, na.rm = TRUE), 3),
+    any_offense_18m   = round(mean(any_offense_18m,        na.rm = TRUE), 3),
+    n = n(),
+    .groups = "drop"
+  ) %>%
+  print()
+```
+```{r}
+#DIFFERENCE IN DIFFERENCE MODELS FIXED EFFECT OLS MODELS
+
+# rel_year == 0 is the exit year; rel_year == 1 is the first full year after.
+# 2-year window (0, 1) is to align as best as possible with our 18mo binary
+# outcomes that we'll test later using conditional logit
+
+daw <- panel_a %>% filter(rel_year <= 1)
+cat("Annual windowed N:", nrow(daw), "| Individuals:", n_distinct(daw$tip_id), "\n\n")
+
+lpm_full_a <- feols(employed_full_year  ~ graduated_tip + graduated_tip:cohort_2022 |
+                      tip_id + year, cluster = ~tip_id, data = daw)
+lpm_part_a <- feols(employed_partial_year ~ graduated_tip + graduated_tip:cohort_2022 |
+                      tip_id + year, cluster = ~tip_id, data = daw)
+lpm_off_a  <- feols(offended_year       ~ graduated_tip + graduated_tip:cohort_2022 |
+                      tip_id + year, cluster = ~tip_id, data = daw)
+ols_earn_a <- feols(log(earnings_year_adj + 1) ~ graduated_tip + graduated_tip:cohort_2022 |
+                      tip_id + year, cluster = ~tip_id, data = daw)
+
+```
+
+```{r}
+#Employment DiD model (full employment, employed at every point in period)
+cat("LPM — Employed (full):\n");     print(summary(lpm_full_a))
+```
+
+```{r}
+#Employment DiD model (partial employment, employed at any point in period)
+cat("\nLPM — Employed (partial):\n"); print(summary(lpm_part_a))
+```
+
+```{r}
+#Offense DiD model (had an offense in the post year)
+cat("\nLPM — Offense:\n");            print(summary(lpm_off_a))
+```
+
+```{r}
+#Earnings DiD model (earnings in the post year)
+cat("\nLog-OLS — Earnings:\n");       print(summary(ols_earn_a))
+```
+```{r}
+#CONDITIONAL LOGIT (18 MONTH POST TIP OUTCOMES)
+tidy_clogit <- function(model, label) {
+  tidy(model, conf.int = TRUE) %>%
+    filter(grepl("graduated_tip|treatment", term)) %>%
+    select(term, estimate, conf.low, conf.high, p.value) %>%
+    mutate(label = label, OR = round(exp(estimate), 3),
+           OR_lo = round(exp(conf.low), 3), OR_hi = round(exp(conf.high), 3),
+           .before = term)
+}
+
+# Person-level 18m clogit — restrict to within_time_window == 1
+# need to make sure individuals have both pre and post data for the logit
+person_m2 <- person_wide %>%
+  filter(full_window == 1) %>%
+  mutate(
+    cohort_2022         = as.integer(cohort_2022),
+    treatment           = as.integer(treatment),
+    any_sentence_before = as.integer(any_sentence_before)
+  )
+
+cat("\nPerson-level 18m clogit N:", nrow(person_m2),
+    "| Pairs:", n_distinct(person_m2$subclass), "\n")
+
+mp_full <- clogit(employed_full_post_18m ~ treatment + treatment:cohort_2022 +
+                    any_sentence_before + strata(subclass),
+                  data = person_m2, method = "efron")
+mp_part <- clogit(employed_part_post_18m ~ treatment + treatment:cohort_2022 +
+                    any_sentence_before + strata(subclass),
+                  data = person_m2, method = "efron")
+mp_off  <- clogit(any_offense_18m ~ treatment + treatment:cohort_2022 +
+                    any_sentence_before + strata(subclass),
+                  data = person_m2, method = "efron")
+
+```
+
+
+```{r}
+cat("\nResults (OR scale):\n")
+print(bind_rows(
+  tidy_clogit(mp_full, "Employed (full, 18m)"),
+  tidy_clogit(mp_part, "Employed (partial, 18m)"),
+  tidy_clogit(mp_off,  "Any offense (18m)")
+), n = Inf)
+
+for (nm in c("mp_full", "mp_part", "mp_off")) {
+  cat(nm, ":\n")
+  tryCatch(
+    print(linearHypothesis(get(nm), "treatment + treatment:cohort_2022 = 0")),
+    error = function(e) cat(
+      "  Skipped — aliased coefficient (interaction not estimable):",
+      conditionMessage(e), "\n"
+    )
+  )
+}
+```
+
+```{r}
+#SENSITIVITY ANALYSIS ON EARNINGS/EMPLOYMENT FINDINGS
+#If TIP is associated with increase in employment, is that was is driving
+#earnings differences? Or are the earnings differences also seen between
+#graduates and non-graduates who are employed
+
+#filter wide data to those who were employed partial year
+daw_emp  <- daw %>% filter(employed_partial_year == 1)
+
+#filter wide data to those who were employed full year
+daw_full_emp <- daw %>% filter(employed_full_year == 1)
+
+#Earnings model conditional on partial employment
+ols_earn_cond_a <- feols(
+  log(earnings_year_adj) ~ graduated_tip + graduated_tip:cohort_2022 |
+    tip_id + year,
+  cluster = ~tip_id, data = daw_emp
+)
+cat("Log earnings | any employment (annual):\n")
+print(summary(ols_earn_cond_a))
+```
+
+
+```{r}
+#Earnings OLS conditional on ful employment
+ols_earn_full_cond_a <- feols(
+  log(earnings_year_adj) ~ graduated_tip + graduated_tip:cohort_2022 |
+    tip_id + year,
+  cluster = ~tip_id, data = daw_full_emp
+)
+cat("\nLog earnings | full-year employment (annual):\n")
+print(summary(ols_earn_full_cond_a))
+```
+
+```{r}
+# Descriptive: mean annual earnings by group x pre/post, conditional on employment
+daw %>%
+  filter(employed_partial_year == 1) %>%
+  mutate(period = if_else(rel_year >= 0, "post-exit", "pre-exit")) %>%
+  group_by(treatment, cohort_2022, period) %>%
+  summarise(
+    mean_earn   = round(mean(earnings_year_adj), 0),
+    median_earn = round(median(earnings_year_adj), 0),
+    p25         = round(quantile(earnings_year_adj, 0.25), 0),
+    p75         = round(quantile(earnings_year_adj, 0.75), 0),
+    n_years     = n(),
+    n_persons   = n_distinct(tip_id),
+    .groups = "drop"
+  ) %>%
+  arrange(cohort_2022, treatment, period) %>%
+  print(n = Inf)
+```
+
+```{r}
+# Unconditional vs. conditional earnings comparison table
+get_fe_safe <- function(model, term) {
+  if (is.null(model)) return(c(NA_real_, NA_real_))
+  ct <- summary(model)$coeftable
+  if (is.null(ct) || !term %in% rownames(ct)) return(c(NA_real_, NA_real_))
+  c(ct[term, "Estimate"], ct[term, "Pr(>|t|)"])
+}
+
+cat("\nUnconditional vs. conditional earnings:\n")
+cat(sprintf("%-40s  %8s %6s\n", "", "Estimate", "p"))
+for (row in list(
+  list("Unconditional log-OLS (incl. zeros)",  ols_earn_a,           "graduated_tip"),
+  list("Conditional: any employment",          ols_earn_cond_a,      "graduated_tip"),
+  list("Conditional: full-year employment",    ols_earn_full_cond_a, "graduated_tip"),
+  list("Uncond x2022+ interaction",            ols_earn_a,           "graduated_tip:cohort_2022"),
+  list("Cond (any) x2022+ interaction",        ols_earn_cond_a,      "graduated_tip:cohort_2022"),
+  list("Cond (full-year) x2022+ interaction",  ols_earn_full_cond_a, "graduated_tip:cohort_2022")
+)) {
+  r <- get_fe_safe(row[[2]], row[[3]])
+  cat(sprintf("%-40s  %8.3f %6.3f\n", row[[1]], r[1], r[2]))
+  
+}
+```
+```{r}
+#Convert OLS earnings estimates to dollars
+# Get mean predicted earnings for non-graduates (control) in your window
+control_mean <- daw %>%
+  filter(graduated_tip == 0) %>%
+  summarise(mean_earn = mean(earnings_year_adj, na.rm = TRUE))
+print(control_mean)
+
+# Then the implied dollar effect is roughly:
+# (e^0.595 - 1) * control_mean
+# BUT this is still an approximation given the +1 we did when logging
+
+# Dollar estimate for 2022 cohort treatment effect
+beta_main    <- coef(ols_earn_a)["graduated_tip"]
+beta_2022    <- coef(ols_earn_a)["graduated_tip:cohort_2022"]
+beta_total   <- beta_main + beta_2022
+
+control_mean_2022 <- daw %>%
+  filter(graduated_tip == 0, cohort_2022 == 1) %>%
+  summarise(mean_earn = mean(earnings_year_adj, na.rm = TRUE)) %>%
+  pull(mean_earn)
+
+dollar_effect_2022 <- (exp(beta_total) - 1) * control_mean_2022
+
+cat("2022 cohort log coefficient:", round(beta_total, 3), "\n")
+cat("2022 cohort control mean earnings: $", round(control_mean_2022), "\n")
+cat("Implied dollar effect: $", round(dollar_effect_2022), "\n")
+
+dollar_effect_2022_only <- (exp(beta_2022) - 1) * control_mean_2022
+
+cat("2022 interaction log coefficient:", round(beta_2022, 3), "\n")
+cat("Implied additional dollar effect from 2022 cohort: $", round(dollar_effect_2022_only), "\n")
+```
+
 
 Note that the `echo = FALSE` parameter was added to the code chunk to prevent printing of the R code that generated the plot.
