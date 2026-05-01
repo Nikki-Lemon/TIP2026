@@ -1,7 +1,7 @@
 ---
 title: "Grad Non-Grad Pre-Trend Tests"
 author: "Sarah Giordano"
-date: "2026-04-25"
+date: "2026-05-01"
 output: html_document
 ---
 
@@ -15,9 +15,8 @@ library(broom)
 library(car)
 
 
-root <- "C://Users/sarah/Documents/CMU/Spring 2026/Systems Synthesis/"
-data_dir <- paste0(root,"Data/Matched/")
-output_dir <- paste0(root, "Output/")
+root <- "#your own working directory here"
+data_dir <- paste0(root,"#your data directory")
 ```
 
 
@@ -25,8 +24,8 @@ output_dir <- paste0(root, "Output/")
 ```{r cars}
 #Load data files
 
-matched_wide <- read_csv(paste0(data_dir, "matched-within-cohort-grad-non-grad.csv"))
-matched_panel <-read_csv(paste0(data_dir, "matched-panel-grad-non-grad.csv"))
+matched_wide <- read_csv(paste0(data_dir, "matched_within_cohort_grad_non_grad_tight.csv"))
+matched_panel <-read_csv(paste0(data_dir, "matched_panel_data_grad_non_grad_tight.csv"))
 
 ```
 
@@ -95,6 +94,7 @@ offense_post22  <- feols(offended_year ~ i(rel_year, treatment, ref = -1) | tip_
 
 
 ```{r}
+#Pre-trend test function adapted from Cameron Drayton's code
 pretrend_test <- function(model, label) {
   cn  <- names(coef(model))
   pre <- grep("rel_year::-(2|3|4)", cn, value = TRUE)
